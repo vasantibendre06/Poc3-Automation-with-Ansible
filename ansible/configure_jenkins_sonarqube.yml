@@ -1,0 +1,78 @@
+---
+- name: Configure JDK in Jenkins
+  hosts: jenkins_host
+  become: true
+  vars:
+    jenkins_host: "3.84.179.226"
+    jenkins_user: "vasanti"
+    jenkins_password: "1140f25034b40004d5c2db9a031325ec83"
+    sonar_token: "squ_19b583678ff2f50ff5ebaaa296e1bbfca6685294"
+    jenkins_image: "jenkins/jenkins:lts"
+    
+  tasks:
+    - name: Get Jenkins Crumb
+      uri:
+        url: "http://{{ jenkins_host }}:8080/crumbIssuer/api/json"
+        method: GET
+        user: "{{ jenkins_user }}"
+        password: "{{ jenkins_password }}"
+        force_basic_auth: yes
+        return_content: yes
+        status_code: 200
+      register: jenkins_crumb
+
+    - name: Add SonarQube token to Jenkins credentials store
+      uri:
+        url: "http://{{ jenkins_host }}:8080/manage/credentials/store/system/domain/_/createCredentials"
+        method: POST
+        user: "{{ jenkins_user }}"
+        password: "{{ jenkins_password }}"
+        force_basic_auth: yes
+        follow_redirects: all
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+          Jenkins-Crumb: "{{ jenkins_crumb.json.crumb }}"
+        body: "json={{ {'': '0', 'credentials': { 'scope': 'GLOBAL', 'id': 'sonarqube-token', 'secret': sonar_token, 'description': 'SonarQube Token', '$class': 'org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl' }} | to_json | urlencode }}"
+      register: add_credentials_response
+
+
+    - name: Debug add_credentials_response
+      debug:
+        var: add_credentials_response
+
+    - name: Ensure Jenkins Groovy initialization directory exists
+      file:
+        path: /var/lib/jenkins/init.groovy.d
+        state: directory
+        mode: '0755'
+
+    - name: Copy Groovy script to Jenkins init directory
+      copy:
+        src: ./configure_jdk.groovy
+        dest: /var/lib/jenkins/init.groovy.d/configure_jdk.groovy
+        owner: jenkins
+        group: jenkins
+        mode: '0644'
+
+    - name: Ensure Jenkins Docker container is present
+      docker_container:
+        name: jenkins
+        image: "{{ jenkins_image }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "8080:8080"
+        recreate: false
+        
+
+    - name: Wait for Jenkins to be back up
+      wait_for:
+        host: "{{ jenkins_host }}"
+        port: 8080
+        delay: 10
+        timeout: 60
+        state: started
+
+    - name: Debug successful execution
+      debug:
+        msg: "JDK configuration script executed on Jenkins Docker container startup."

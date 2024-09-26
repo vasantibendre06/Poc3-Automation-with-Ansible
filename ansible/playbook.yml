@@ -1,0 +1,140 @@
+---
+- name: Configure Jenkins and SonarQube on Docker Containers
+  hosts: all
+  become: true
+  vars:
+    jenkins_host: "54.205.181.166"
+    jenkins_user: "vasanti"
+    jenkins_password: "password20"
+  tasks:
+    - name: Ensure passwordless sudo for the user
+      lineinfile:
+        path: /etc/sudoers
+        line: "{{ ansible_user }} ALL=(ALL) NOPASSWD: ALL"
+        state: present
+        validate: '/usr/sbin/visudo -cf %s'
+    - name: Ensure Jenkins home directory structure exists
+      shell: |
+        docker exec jenkins bash -c "mkdir -p /var/jenkins_home/users/admin"
+    - name: Disable Jenkins setup wizard inside container
+      shell: |
+        docker exec jenkins bash -c 'echo "JAVA_OPTS=-Djenkins.install.runSetupWizard=false" > /var/jenkins_home/init.groovy.d/configuration'
+    - name: Create Jenkins admin user configuration
+      shell: |
+        docker exec -i jenkins tee /var/jenkins_home/init.groovy.d/basic-security.groovy <<EOF
+        #!groovy
+        import jenkins.model.*
+        import hudson.security.*
+        def instance = Jenkins.getInstance()
+        println "--> creating local user 'admin'"
+        def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+        hudsonRealm.createAccount('admin', 'admin')
+        instance.setSecurityRealm(hudsonRealm)
+        def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+        instance.setAuthorizationStrategy(strategy)
+        instance.setCrumbIssuer(null)
+        instance.save()
+        EOF
+
+    - name: Restart Jenkins service to apply changes
+      shell: docker restart jenkins
+
+    - name: Wait for Jenkins to restart
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 8080
+        delay: 15
+        timeout: 300
+
+    - name: Check if Jenkins is running
+      uri:
+        url: "http://{{ jenkins_host }}:8080"
+        return_content: yes
+      register: jenkins_status
+      ignore_errors: yes
+
+    - name: Set Jenkins running fact
+      set_fact:
+        jenkins_running: "{{ jenkins_status.status == 200 }}"
+
+
+    - name: Ensure Jenkins CLI directory exists
+      file:
+        path: /usr/local/bin/jenkins-cli
+        state: directory
+        mode: '0755'
+
+    - name: Download Jenkins CLI jar
+      get_url:
+        url: "http://{{ jenkins_host }}:8080/jnlpJars/jenkins-cli.jar"
+        dest: /usr/local/bin/jenkins-cli/jenkins-cli.jar
+        mode: '0755'
+      when: jenkins_running
+      register: download_result
+
+    - name: Verify if Jenkins CLI was downloaded successfully
+      debug:
+        var: download_result
+
+    - name: Set executable permission on Jenkins CLI
+      file:
+        path: /usr/local/bin/jenkins-cli/jenkins-cli.jar
+        mode: '0755'
+        owner: root
+        group: root
+      when: download_result is changed
+
+    - name: Create Jenkins CLI symlink for easier access
+      file:
+        src: /usr/local/bin/jenkins-cli/jenkins-cli.jar
+        dest: /usr/local/bin/jenkins-cli
+        state: link
+        force: yes
+      when: download_result is changed
+
+    - name: Copy jenkins-cli.jar to Jenkins container
+      command: docker cp /tmp/jenkins-cli.jar jenkins:/tmp/jenkins-cli.jar
+
+    - name: Install Jenkins plugins
+      command: >
+        docker exec jenkins java -jar /tmp/jenkins-cli.jar -s http://{{ jenkins_host }}:8080/ -auth {{ jenkins_user }}:{{ jenkins_password }} install-plugin {{ item }}
+      loop:
+        - git
+        - workflow-aggregator
+        - sonar
+      register: install_result
+
+    - name: Verify Jenkins is running
+      shell: |
+        curl -f -u admin:admin 'http://{{ inventory_hostname }}:8080/api/json'
+      register: jenkins_status
+      retries: 5
+      delay: 10
+      until: jenkins_status.rc == 0
+
+    - name: Install Job DSL Plugin on Jenkins
+      shell: |
+        docker exec -i jenkins java -jar /tmp/jenkins-cli.jar -s http://{{ jenkins_host }}:8080/ -auth {{ jenkins_user }}:{{ jenkins_password }} install-plugin job-dsl
+      ignore_errors: true
+
+    - name: Create Jenkins job configuration XML from template
+      template:
+        src: templates/job-config.xml.j2
+        dest: /tmp/job-config.xml
+    - name: Upload job configuration XML to Jenkins container
+      command: docker cp /tmp/job-config.xml jenkins:/tmp/job-config.xml
+    # - name: Create Jenkins pipeline job from XML config
+    #   shell: |
+    #     docker exec -i jenkins java -jar /tmp/jenkins-cli.jar -s http://{{ jenkins_host }}:8080/ -auth {{ jenkins_user }}:{{ jenkins_password }} create-job Drrible-Clone < /tmp/job-config.xml
+    - name: Add SonarQube Scanner installation to Jenkins
+      uri:
+        url: "http://{{ jenkins_host }}:8080/computer/api/json"
+        method: POST
+        user: "{{ jenkins_user }}"
+        password: "{{ jenkins_token }}"
+        body:
+          name: "SonarQube Scanner"
+          home: "/otp/sonar-scanner"
+          install_source: "default"
+        body_format: json
+        status_code: 200

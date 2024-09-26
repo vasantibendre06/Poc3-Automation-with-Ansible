@@ -1,0 +1,23 @@
+---
+- name: Setup Jenkins
+  hosts: jenkins_host  # Change to the appropriate host group or hostname in your inventory
+  become: yes  # Use this if you need to run tasks as sudo
+
+  tasks:
+    - name: Copy Groovy script to Jenkins init directory
+      copy:
+        src: /root/poc3/jenkins/init.groovy   # Path to the Groovy script
+        dest: /var/jenkins_home/init.groovy.d/setup.groovy  # Target path in Jenkins home directory
+
+    - name: Ensure Jenkins is running
+      docker_container:
+        name: jenkins
+        state: started
+
+    - name: Install necessary plugins
+      shell: |
+        java -jar /usr/share/jenkins/jenkins.war --httpPort=8080 &
+        sleep 10  # Allow time for Jenkins to start
+        curl -X POST -u vasanti:password20 'http://localhost:8080/pluginManager/installPlugins?plugins=workflow-aggregator,git,blueocean,sonar,pipeline-utility-steps,email-ext'
+        # Replace 'new_admin_user' and 'new_secure_password' with your actual credentials
+
